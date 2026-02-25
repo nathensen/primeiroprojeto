@@ -1,19 +1,19 @@
 import javax.swing.*;
 import javax.swing.border.TitledBorder;
 import java.awt.*;
-import java.awt.event.WindowAdapter;
-import java.awt.event.WindowEvent;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * GUI da Bancada com 4 setores (ESTOQUE, PROCESSO, MONTAGEM, EXPEDIÇÃO),
- * IPs pré-configurados e fundo rosa claro.
- * Esta classe usa o PlcConnector existente SEM alterar nenhuma linha das suas classes de comunicação.
+ * BancadaMonitorUI
+ * Dois monitores independentes para acompanhar setores da Bancada ao mesmo tempo,
+ * com seleção de setor, tipo de leitura e parâmetros (DB/Offset/Bit/Tamanho).
+ *
+ * Requisitos: classes PlcConnector / S7ProtocolClient existentes no projeto.
  */
-public class BancadaUI {
+public class BancadaUI extends JFrame {
 
-    // Mapa de Setor -> IP (fixo)
+    // Setores e IPs fixos
     private static final Map<String, String> SETORES = new LinkedHashMap<>() {{
         put("ESTOQUE",   "10.74.241.10");
         put("PROCESSO",  "10.74.241.20");
@@ -23,7 +23,7 @@ public class BancadaUI {
     private static final int PORTA_S7 = 102;
 
     public static void main(String[] args) {
-        // Look & Feel mais moderno (Nimbus)
+        // Look&Feel agradável
         try {
             for (UIManager.LookAndFeelInfo info : UIManager.getInstalledLookAndFeels()) {
                 if ("Nimbus".equalsIgnoreCase(info.getName())) {
@@ -33,506 +33,227 @@ public class BancadaUI {
             }
         } catch (Exception ignored) {}
 
-        SwingUtilities.invokeLater(BancadaUI::criarTelaPrincipal);
+        SwingUtilities.invokeLater(() -> {
+            BancadaUI ui = new BancadaUI();
+            ui.setVisible(true);
+        });
     }
 
-    private static void criarTelaPrincipal() {
-        JFrame frame = new JFrame("Bancada – Seleção de Setor");
-        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setSize(820, 560);
-        frame.setLocationRelativeTo(null);
+    public BancadaUI() {
+        super("Bancada – Monitoramento em Paralelo");
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setSize(980, 640);
+        setLocationRelativeTo(null);
 
-        JPanel root = new JPanel(new BorderLayout(18, 18));
+        JPanel root = new JPanel(new BorderLayout(12, 12));
         root.setBackground(Color.decode("#FFE6F0"));
+        root.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
 
-        JLabel titulo = new JLabel("Bancada • Selecione o Setor", SwingConstants.CENTER);
-        titulo.setFont(new Font("Segoe UI", Font.BOLD, 24));
+        JLabel titulo = new JLabel("Bancada • Monitoramento em Paralelo (selecione 2 setores)", SwingConstants.CENTER);
+        titulo.setFont(new Font("Segoe UI", Font.BOLD, 22));
         titulo.setForeground(new Color(51, 51, 51));
         root.add(titulo, BorderLayout.NORTH);
 
-        JPanel grid = new JPanel(new GridLayout(2, 2, 18, 18));
+        JPanel grid = new JPanel(new GridLayout(1, 2, 12, 12));
         grid.setOpaque(false);
 
-        Map<String, String> emoji = Map.of(
-                "ESTOQUE", "📦",
-                "PROCESSO", "⚙️",
-                "MONTAGEM", "🛠️",
-                "EXPEDIÇÃO", "🚚"
-        );
-
-        for (var e : SETORES.entrySet()) {
-            String setor = e.getKey();
-            String ip = e.getValue();
-            JButton btn = criarBotaoSetor(
-                    (emoji.getOrDefault(setor, "🔹")) + " " + setor,
-                    ip
-            );
-            btn.addActionListener(ev -> new JanelaSetor(frame, setor, ip).mostrar());
-            grid.add(btn);
-        }
+        MonitorPanel monitorA = new MonitorPanel("Monitor A");
+        MonitorPanel monitorB = new MonitorPanel("Monitor B");
+        grid.add(monitorA);
+        grid.add(monitorB);
 
         root.add(grid, BorderLayout.CENTER);
 
-        JLabel rodape = new JLabel("CLP Siemens S7 – ISO-on-TCP (porta 102)", SwingConstants.CENTER);
+        JLabel rodape = new JLabel("CLP Siemens S7 – ISO-on-TCP (porta 102) | Fundo: #FFE6F0", SwingConstants.CENTER);
         rodape.setForeground(new Color(90, 90, 90));
-        rodape.setBorder(BorderFactory.createEmptyBorder(0, 0, 10, 0));
         root.add(rodape, BorderLayout.SOUTH);
 
-        frame.setContentPane(root);
-        frame.setVisible(true);
+        setContentPane(root);
     }
 
-    private static JButton criarBotaoSetor(String titulo, String ip) {
-        String html = """
-                <html><center>
-                <div style='font-size:18px; font-weight:bold;'>%s</div>
-                <div style='margin-top:6px; color:#444;'>%s</div>
-                </center></html>
-                """.formatted(titulo, ip);
+    // --------- Painel individual do monitor ---------
 
-        JButton btn = new JButton(html);
-        btn.setFont(new Font("Segoe UI", Font.PLAIN, 16));
-        btn.setBackground(Color.WHITE);
-        btn.setForeground(new Color(51, 51, 51));
-        btn.setFocusPainted(false);
-        btn.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(new Color(209, 107, 165), 2),
-                BorderFactory.createEmptyBorder(20, 24, 20, 24)
-        ));
-        return btn;
-    }
+    private class MonitorPanel extends JPanel {
+        private final String titulo;
 
-    // ------------------------ Janela do Setor ------------------------
+        private JComboBox<String> cbSetor;
+        private JComboBox<String> cbTipo;
+        private JTextField tfDb, tfOffset, tfBit, tfSize;
+        private JSpinner spIntervalo;
+        private JButton btnIniciar, btnParar;
+        private JLabel lblStatus, lblValorAtual;
+        private JTextArea logArea;
 
-    private static class JanelaSetor extends JDialog {
-        private final String setor;
-        private final String ip;
-        private PlcConnector connector;
+        private MonitorWorker worker; // SwingWorker rodando este monitor
 
-        // UI
-        private final JLabel lblStatus = new JLabel("Desconectado");
-        private final JTextArea log = new JTextArea(8, 20);
+        MonitorPanel(String titulo) {
+            super(new BorderLayout(10, 10));
+            this.titulo = titulo;
+            setOpaque(true);
+            setBackground(Color.decode("#FDE7F3"));
+            setBorder(BorderFactory.createTitledBorder(
+                    BorderFactory.createLineBorder(new Color(209, 107, 165), 2),
+                    titulo, TitledBorder.LEFT, TitledBorder.TOP, new Font("Segoe UI", Font.BOLD, 14)
+            ));
 
-        // Leituras
-        private final JComboBox<String> cbTipoRead = new JComboBox<>(new String[]{"bit", "byte", "int", "float", "string", "block"});
-        private final JTextField tfDbRead = new JTextField();
-        private final JTextField tfOffsetRead = new JTextField();
-        private final JTextField tfBitRead = new JTextField();     // habilita apenas quando "bit"
-        private final JTextField tfSizeRead = new JTextField();    // habilita em "string" e "block"
-        private final JButton btnLer = new JButton("Ler");
-
-        // Escritas
-        private final JComboBox<String> cbTipoWrite = new JComboBox<>(new String[]{"bit", "byte", "int", "float", "string"});
-        private final JTextField tfDbWrite = new JTextField();
-        private final JTextField tfOffsetWrite = new JTextField();
-        private final JTextField tfBitWrite = new JTextField();    // habilita apenas quando "bit"
-        private final JTextField tfValorWrite = new JTextField();
-        private final JButton btnEscrever = new JButton("Escrever");
-
-        private final JButton btnVoltar = new JButton("Desconectar / Voltar");
-
-        JanelaSetor(Frame owner, String setor, String ip) {
-            super(owner, true);
-            this.setor = setor;
-            this.ip = ip;
-
-            setTitle(setor + " – " + ip);
-            setSize(900, 640);
-            setLocationRelativeTo(owner);
-
-            JPanel root = new JPanel(new BorderLayout(12, 12));
-            root.setBackground(Color.decode("#FDE7F3"));
-            root.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-
-            // Topo: título + status
-            JPanel topo = new JPanel(new BorderLayout());
+            JPanel topo = new JPanel(new GridBagLayout());
             topo.setOpaque(false);
-            JLabel titulo = new JLabel("Setor: " + setor + "   |   CLP: " + ip, SwingConstants.LEFT);
-            titulo.setFont(new Font("Segoe UI", Font.BOLD, 20));
-            topo.add(titulo, BorderLayout.WEST);
+            GridBagConstraints c = new GridBagConstraints();
+            c.insets = new Insets(6, 6, 6, 6);
+            c.fill = GridBagConstraints.HORIZONTAL;
 
-            lblStatus.setIcon(criarBola(Color.RED));
-            lblStatus.setForeground(new Color(80, 80, 80));
-            lblStatus.setHorizontalTextPosition(SwingConstants.RIGHT);
-            topo.add(lblStatus, BorderLayout.EAST);
+            cbSetor = new JComboBox<>(SETORES.keySet().toArray(new String[0]));
+            cbTipo = new JComboBox<>(new String[]{"bit", "byte", "int", "float", "string", "block"});
 
-            root.add(topo, BorderLayout.NORTH);
+            tfDb = new JTextField();
+            tfOffset = new JTextField();
+            tfBit = new JTextField();
+            tfSize = new JTextField();
 
-            // Centro: abas
-            JTabbedPane tabs = new JTabbedPane();
-            tabs.setBackground(Color.decode("#FDE7F3"));
-            tabs.addTab("Leitura", criarPainelLeitura());
-            tabs.addTab("Escrita", criarPainelEscrita());
-            tabs.addTab("Ajuda", criarPainelAjuda());
-            root.add(tabs, BorderLayout.CENTER);
+            spIntervalo = new JSpinner(new SpinnerNumberModel(1000, 200, 5000, 100));
+            btnIniciar = new JButton("Iniciar");
+            btnParar = new JButton("Parar");
 
-            // Bottom: Log + Voltar
-            JPanel bottom = new JPanel(new BorderLayout(8, 8));
-            bottom.setOpaque(false);
+            lblStatus = new JLabel("Desconectado", criarBola(Color.RED), SwingConstants.LEFT);
+            lblValorAtual = new JLabel("—");
 
-            log.setEditable(false);
-            log.setFont(new Font("Consolas", Font.PLAIN, 13));
-            JScrollPane spLog = new JScrollPane(log);
-            spLog.setBorder(BorderFactory.createTitledBorder(
+            int row = 0;
+            c.gridx = 0; c.gridy = row; topo.add(new JLabel("Setor:"), c);
+            c.gridx = 1; c.gridy = row; topo.add(cbSetor, c);
+            c.gridx = 2; c.gridy = row; topo.add(new JLabel("Tipo:"), c);
+            c.gridx = 3; c.gridy = row; topo.add(cbTipo, c);
+            row++;
+
+            c.gridx = 0; c.gridy = row; topo.add(new JLabel("DB:"), c);
+            c.gridx = 1; c.gridy = row; topo.add(tfDb, c);
+            c.gridx = 2; c.gridy = row; topo.add(new JLabel("Offset (byte):"), c);
+            c.gridx = 3; c.gridy = row; topo.add(tfOffset, c);
+            row++;
+
+            c.gridx = 0; c.gridy = row; topo.add(new JLabel("Bit (0–7):"), c);
+            c.gridx = 1; c.gridy = row; topo.add(tfBit, c);
+            c.gridx = 2; c.gridy = row; topo.add(new JLabel("Tamanho (bytes):"), c);
+            c.gridx = 3; c.gridy = row; topo.add(tfSize, c);
+            row++;
+
+            c.gridx = 0; c.gridy = row; topo.add(new JLabel("Intervalo (ms):"), c);
+            c.gridx = 1; c.gridy = row; topo.add(spIntervalo, c);
+            c.gridx = 2; c.gridy = row; topo.add(btnIniciar, c);
+            c.gridx = 3; c.gridy = row; topo.add(btnParar, c);
+            row++;
+
+            c.gridx = 0; c.gridy = row; c.gridwidth = 2; topo.add(lblStatus, c);
+            c.gridx = 2; c.gridy = row; c.gridwidth = 2;
+            JPanel valorBox = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+            valorBox.setOpaque(false);
+            valorBox.add(new JLabel("Valor atual: "));
+            valorBox.add(lblValorAtual);
+            topo.add(valorBox, c);
+
+            add(topo, BorderLayout.NORTH);
+
+            logArea = new JTextArea();
+            logArea.setEditable(false);
+            logArea.setFont(new Font("Consolas", Font.PLAIN, 12));
+            JScrollPane sp = new JScrollPane(logArea);
+            sp.setBorder(BorderFactory.createTitledBorder(
                     BorderFactory.createLineBorder(new Color(209, 107, 165)),
                     "Log", TitledBorder.LEFT, TitledBorder.TOP
             ));
+            add(sp, BorderLayout.CENTER);
 
-            bottom.add(spLog, BorderLayout.CENTER);
+            // Estado inicial de campos dependentes
+            atualizarHabilitacaoCampos();
+            cbTipo.addActionListener(e -> atualizarHabilitacaoCampos());
 
-            JPanel boxVoltar = new JPanel(new FlowLayout(FlowLayout.RIGHT));
-            boxVoltar.setOpaque(false);
-            estilizarBotaoPerigo(btnVoltar);
-            boxVoltar.add(btnVoltar);
-            bottom.add(boxVoltar, BorderLayout.SOUTH);
-
-            root.add(bottom, BorderLayout.SOUTH);
-
-            setContentPane(root);
-
-            // Eventos UI
-            cbTipoRead.addActionListener(e -> atualizarCamposLeitura());
-            cbTipoWrite.addActionListener(e -> atualizarCamposEscrita());
-
-            btnLer.addActionListener(e -> executarLeitura());
-            btnEscrever.addActionListener(e -> executarEscrita());
-            btnVoltar.addActionListener(e -> {
-                desconectarSilencioso();
-                dispose();
-            });
-
-            addWindowListener(new WindowAdapter() {
-                @Override
-                public void windowClosing(WindowEvent e) {
-                    desconectarSilencioso();
-                }
-            });
+            btnIniciar.addActionListener(e -> iniciarMonitor());
+            btnParar.addActionListener(e -> pararMonitor());
         }
 
-        void mostrar() {
-            // Conectar em background (não travar UI)
-            setControlesHabilitados(false);
-            lblStatus.setText("Conectando...");
-            lblStatus.setIcon(criarBola(Color.ORANGE));
+        private void atualizarHabilitacaoCampos() {
+            String tipo = String.valueOf(cbTipo.getSelectedItem()).toLowerCase();
+            boolean isBit = "bit".equals(tipo);
+            boolean needsSize = "string".equals(tipo) || "block".equals(tipo);
 
-            new SwingWorker<Void, Void>() {
-                private Exception erro;
+            tfBit.setEnabled(isBit);
+            if (!isBit) tfBit.setText("");
 
-                @Override
-                protected Void doInBackground() {
-                    try {
-                        connector = new PlcConnector(ip, PORTA_S7);
-                        connector.connect();
-                    } catch (Exception ex) {
-                        erro = ex;
-                    }
-                    return null;
-                }
-
-                @Override
-                protected void done() {
-                    if (erro != null) {
-                        lblStatus.setText("Falha na conexão");
-                        lblStatus.setIcon(criarBola(Color.RED));
-                        JOptionPane.showMessageDialog(JanelaSetor.this,
-                                "Erro ao conectar: " + erro.getMessage(),
-                                "Conexão", JOptionPane.ERROR_MESSAGE);
-                        dispose();
-                    } else {
-                        lblStatus.setText("Conectado");
-                        lblStatus.setIcon(criarBola(new Color(0, 160, 0)));
-                        log.append("Conectado a " + ip + "\n");
-                        setControlesHabilitados(true);
-                        setVisible(true);
-                    }
-                }
-            }.execute();
+            tfSize.setEnabled(needsSize);
+            if (!needsSize) tfSize.setText("");
         }
 
-        private JPanel criarPainelLeitura() {
-            JPanel p = new JPanel(new GridBagLayout());
-            p.setOpaque(false);
-            GridBagConstraints c = new GridBagConstraints();
-            c.insets = new Insets(6, 6, 6, 6);
-            c.fill = GridBagConstraints.HORIZONTAL;
+        private void iniciarMonitor() {
+            if (worker != null && !worker.isDone()) {
+                appendLog("Monitor já está em execução.");
+                return;
+            }
+            // Validação de campos
+            String setor = String.valueOf(cbSetor.getSelectedItem());
+            String ip = SETORES.get(setor);
+            String tipo = String.valueOf(cbTipo.getSelectedItem()).toLowerCase();
 
-            int row = 0;
-
-            c.gridx = 0; c.gridy = row; p.add(new JLabel("Tipo:"), c);
-            c.gridx = 1; c.gridy = row; p.add(cbTipoRead, c);
-            row++;
-
-            c.gridx = 0; c.gridy = row; p.add(new JLabel("DB:"), c);
-            c.gridx = 1; c.gridy = row; p.add(tfDbRead, c);
-            row++;
-
-            c.gridx = 0; c.gridy = row; p.add(new JLabel("Offset (byte):"), c);
-            c.gridx = 1; c.gridy = row; p.add(tfOffsetRead, c);
-            row++;
-
-            c.gridx = 0; c.gridy = row; p.add(new JLabel("Bit (0-7):"), c);
-            c.gridx = 1; c.gridy = row; p.add(tfBitRead, c);
-            row++;
-
-            c.gridx = 0; c.gridy = row; p.add(new JLabel("Tamanho (bytes):"), c);
-            c.gridx = 1; c.gridy = row; p.add(tfSizeRead, c);
-            row++;
-
-            JButton btn = btnLer;
-            estilizarBotaoPrimario(btn);
-            c.gridx = 0; c.gridy = row; c.gridwidth = 2; p.add(btn, c);
-            row++;
-
-            atualizarCamposLeitura();
-            return p;
-        }
-
-        private JPanel criarPainelEscrita() {
-            JPanel p = new JPanel(new GridBagLayout());
-            p.setOpaque(false);
-            GridBagConstraints c = new GridBagConstraints();
-            c.insets = new Insets(6, 6, 6, 6);
-            c.fill = GridBagConstraints.HORIZONTAL;
-
-            int row = 0;
-
-            c.gridx = 0; c.gridy = row; p.add(new JLabel("Tipo:"), c);
-            c.gridx = 1; c.gridy = row; p.add(cbTipoWrite, c);
-            row++;
-
-            c.gridx = 0; c.gridy = row; p.add(new JLabel("DB:"), c);
-            c.gridx = 1; c.gridy = row; p.add(tfDbWrite, c);
-            row++;
-
-            c.gridx = 0; c.gridy = row; p.add(new JLabel("Offset (byte):"), c);
-            c.gridx = 1; c.gridy = row; p.add(tfOffsetWrite, c);
-            row++;
-
-            c.gridx = 0; c.gridy = row; p.add(new JLabel("Bit (0-7):"), c);
-            c.gridx = 1; c.gridy = row; p.add(tfBitWrite, c);
-            row++;
-
-            c.gridx = 0; c.gridy = row; p.add(new JLabel("Valor:"), c);
-            c.gridx = 1; c.gridy = row; p.add(tfValorWrite, c);
-            row++;
-
-            JButton btn = btnEscrever;
-            estilizarBotaoPrimario(btn);
-            c.gridx = 0; c.gridy = row; c.gridwidth = 2; p.add(btn, c);
-            row++;
-
-            atualizarCamposEscrita();
-            return p;
-        }
-
-        private JPanel criarPainelAjuda() {
-            JPanel p = new JPanel(new BorderLayout());
-            p.setOpaque(false);
-
-            JTextArea ajuda = new JTextArea("""
-                    💡 Dicas de uso
-                    • Utilize DB / Offset conforme o mapeamento da Bancada.
-                    • Tipos suportados:
-                      - Leitura: bit, byte, int, float, string, block
-                      - Escrita: bit, byte, int, float, string
-                    • Para BIT, informe o número do bit (0 a 7).
-                    • Para STRING e BLOCO, informe o "Tamanho (bytes)".
-                    • Porta S7 padrão: 102
-                    • Área: DB (S7-ANY)
-                    """);
-            ajuda.setEditable(false);
-            ajuda.setLineWrap(true);
-            ajuda.setWrapStyleWord(true);
-            ajuda.setFont(new Font("Segoe UI", Font.PLAIN, 14));
-            ajuda.setBackground(new Color(0,0,0,0));
-
-            p.add(ajuda, BorderLayout.CENTER);
-            return p;
-        }
-
-        private void atualizarCamposLeitura() {
-            String tipo = (String) cbTipoRead.getSelectedItem();
-            boolean isBit = "bit".equalsIgnoreCase(tipo);
-            boolean needsSize = "string".equalsIgnoreCase(tipo) || "block".equalsIgnoreCase(tipo);
-
-            tfBitRead.setEnabled(isBit);
-            tfBitRead.setToolTipText(isBit ? "Informe um valor entre 0 e 7" : "Não aplicável");
-            if (!isBit) tfBitRead.setText("");
-
-            tfSizeRead.setEnabled(needsSize);
-            tfSizeRead.setToolTipText(needsSize ? "Informe o tamanho em bytes" : "Não aplicável");
-            if (!needsSize) tfSizeRead.setText("");
-        }
-
-        private void atualizarCamposEscrita() {
-            String tipo = (String) cbTipoWrite.getSelectedItem();
-            boolean isBit = "bit".equalsIgnoreCase(tipo);
-
-            tfBitWrite.setEnabled(isBit);
-            tfBitWrite.setToolTipText(isBit ? "Informe um valor entre 0 e 7" : "Não aplicável");
-            if (!isBit) tfBitWrite.setText("");
-
-            tfValorWrite.setToolTipText(sugestaoValor(tipo));
-        }
-
-        private String sugestaoValor(String tipo) {
-            return switch (tipo.toLowerCase()) {
-                case "bit" -> "true / false";
-                case "byte" -> "0..255";
-                case "int" -> "inteiro (ex.: 123)";
-                case "float" -> "real (ex.: 12.34)";
-                case "string" -> "texto";
-                default -> "";
-            };
-        }
-
-        private void executarLeitura() {
-            setControlesHabilitados(false);
-            new SwingWorker<Void, Void>() {
-                private String mensagem;
-
-                @Override
-                protected Void doInBackground() {
-                    try {
-                        String tipo = ((String) cbTipoRead.getSelectedItem()).toLowerCase();
-                        int db = Integer.parseInt(tfDbRead.getText().trim());
-                        int offset = Integer.parseInt(tfOffsetRead.getText().trim());
-
-                        switch (tipo) {
-                            case "bit" -> {
-                                int bit = Integer.parseInt(tfBitRead.getText().trim());
-                                boolean v = connector.readBit(db, offset, bit);
-                                mensagem = String.format("[%s] LER BIT DB%d.DBX%d.%d = %s%n", setor, db, offset, bit, v);
-                            }
-                            case "byte" -> {
-                                byte v = connector.readByte(db, offset);
-                                mensagem = String.format("[%s] LER BYTE DB%d.DBB%d = %d (0x%02X)%n", setor, db, offset, v, v);
-                            }
-                            case "int" -> {
-                                int v = connector.readInt(db, offset);
-                                mensagem = String.format("[%s] LER INT DB%d.DBW%d = %d%n", setor, db, offset, v);
-                            }
-                            case "float" -> {
-                                float v = connector.readFloat(db, offset);
-                                mensagem = String.format("[%s] LER REAL DB%d.DBD%d = %.4f%n", setor, db, offset, v);
-                            }
-                            case "string" -> {
-                                int size = Integer.parseInt(tfSizeRead.getText().trim());
-                                String v = connector.readString(db, offset, size);
-                                mensagem = String.format("[%s] LER STRING DB%d.DBB%d[%d] = \"%s\"%n", setor, db, offset, size, v);
-                            }
-                            case "block" -> {
-                                int size = Integer.parseInt(tfSizeRead.getText().trim());
-                                byte[] bytes = connector.readBlock(db, offset, size);
-                                mensagem = String.format("[%s] LER BLOCO DB%d.DBB%d [%d] = %s%n",
-                                        setor, db, offset, size, bytesToHex(bytes));
-                            }
-                            default -> mensagem = "Tipo inválido para leitura.\n";
-                        }
-                    } catch (Exception ex) {
-                        mensagem = "Erro na leitura: " + ex.getMessage() + "\n";
-                    }
-                    return null;
-                }
-
-                @Override
-                protected void done() {
-                    log.append(mensagem);
-                    setControlesHabilitados(true);
-                }
-            }.execute();
-        }
-
-        private void executarEscrita() {
-            setControlesHabilitados(false);
-            new SwingWorker<Void, Void>() {
-                private String mensagem;
-
-                @Override
-                protected Void doInBackground() {
-                    try {
-                        String tipo = ((String) cbTipoWrite.getSelectedItem()).toLowerCase();
-                        int db = Integer.parseInt(tfDbWrite.getText().trim());
-                        int offset = Integer.parseInt(tfOffsetWrite.getText().trim());
-                        boolean ok;
-
-                        switch (tipo) {
-                            case "bit" -> {
-                                int bit = Integer.parseInt(tfBitWrite.getText().trim());
-                                boolean val = Boolean.parseBoolean(tfValorWrite.getText().trim());
-                                ok = connector.writeBit(db, offset, bit, val);
-                                mensagem = String.format("[%s] ESCREVER BIT DB%d.DBX%d.%d = %s -> %s%n",
-                                        setor, db, offset, bit, val, ok);
-                            }
-                            case "byte" -> {
-                                byte v = Byte.parseByte(tfValorWrite.getText().trim());
-                                ok = connector.writeByte(db, offset, v);
-                                mensagem = String.format("[%s] ESCREVER BYTE DB%d.DBB%d = %d -> %s%n",
-                                        setor, db, offset, v, ok);
-                            }
-                            case "int" -> {
-                                int v = Integer.parseInt(tfValorWrite.getText().trim());
-                                ok = connector.writeInt(db, offset, v);
-                                mensagem = String.format("[%s] ESCREVER INT DB%d.DBW%d = %d -> %s%n",
-                                        setor, db, offset, v, ok);
-                            }
-                            case "float" -> {
-                                float v = Float.parseFloat(tfValorWrite.getText().trim());
-                                ok = connector.writeFloat(db, offset, v);
-                                mensagem = String.format("[%s] ESCREVER REAL DB%d.DBD%d = %s -> %s%n",
-                                        setor, db, offset, v, ok);
-                            }
-                            case "string" -> {
-                                String s = tfValorWrite.getText();
-                                ok = connector.writeString(db, offset, s.length(), s);
-                                mensagem = String.format("[%s] ESCREVER STRING DB%d.DBB%d = \"%s\" -> %s%n",
-                                        setor, db, offset, s, ok);
-                            }
-                            default -> mensagem = "Tipo inválido para escrita.\n";
-                        }
-                    } catch (Exception ex) {
-                        mensagem = "Erro na escrita: " + ex.getMessage() + "\n";
-                    }
-                    return null;
-                }
-
-                @Override
-                protected void done() {
-                    log.append(mensagem);
-                    setControlesHabilitados(true);
-                }
-            }.execute();
-        }
-
-        private void setControlesHabilitados(boolean enabled) {
-            cbTipoRead.setEnabled(enabled);
-            tfDbRead.setEnabled(enabled);
-            tfOffsetRead.setEnabled(enabled);
-            tfBitRead.setEnabled(enabled);
-            tfSizeRead.setEnabled(enabled);
-            btnLer.setEnabled(enabled);
-
-            cbTipoWrite.setEnabled(enabled);
-            tfDbWrite.setEnabled(enabled);
-            tfOffsetWrite.setEnabled(enabled);
-            tfBitWrite.setEnabled(enabled);
-            tfValorWrite.setEnabled(enabled);
-            btnEscrever.setEnabled(enabled);
-
-            btnVoltar.setEnabled(true); // sempre pode voltar
-        }
-
-        private void desconectarSilencioso() {
+            Integer db, offset, bit = null, size = null, intervalo;
             try {
-                if (connector != null) {
-                    connector.disconnect();
-                    lblStatus.setText("Desconectado");
-                    lblStatus.setIcon(criarBola(Color.RED));
+                db = Integer.parseInt(tfDb.getText().trim());
+                offset = Integer.parseInt(tfOffset.getText().trim());
+                if ("bit".equals(tipo)) {
+                    bit = Integer.parseInt(tfBit.getText().trim());
+                    if (bit < 0 || bit > 7) throw new IllegalArgumentException("Bit deve ser 0..7");
                 }
-            } catch (Exception ignored) {}
+                if ("string".equals(tipo) || "block".equals(tipo)) {
+                    size = Integer.parseInt(tfSize.getText().trim());
+                    if (size <= 0) throw new IllegalArgumentException("Tamanho deve ser > 0");
+                }
+                intervalo = (Integer) spIntervalo.getValue();
+            } catch (Exception ex) {
+                JOptionPane.showMessageDialog(this, "Preencha os campos corretamente.\n" + ex.getMessage(),
+                        "Campos inválidos", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+
+            // Cria e inicia o worker
+            worker = new MonitorWorker(setor, ip, tipo, db, offset, bit, size, intervalo);
+            setRodando(true);
+            worker.execute();
         }
 
-        private static Icon criarBola(Color cor) {
+        private void pararMonitor() {
+            if (worker != null) {
+                worker.cancel(true);
+                worker = null;
+            }
+            setRodando(false);
+            lblValorAtual.setText("—");
+        }
+
+        private void setRodando(boolean on) {
+            cbSetor.setEnabled(!on);
+            cbTipo.setEnabled(!on);
+            tfDb.setEnabled(!on);
+            tfOffset.setEnabled(!on);
+            tfBit.setEnabled(!on && "bit".equals(String.valueOf(cbTipo.getSelectedItem()).toLowerCase()));
+            tfSize.setEnabled(!on && ("string".equals(String.valueOf(cbTipo.getSelectedItem()).toLowerCase())
+                    || "block".equals(String.valueOf(cbTipo.getSelectedItem()).toLowerCase())));
+            spIntervalo.setEnabled(!on);
+
+            if (on) {
+                lblStatus.setText("Conectando...");
+                lblStatus.setIcon(criarBola(Color.ORANGE));
+            } else {
+                lblStatus.setText("Desconectado");
+                lblStatus.setIcon(criarBola(Color.RED));
+            }
+        }
+
+        private void appendLog(String msg) {
+            logArea.append(msg + "\n");
+            // opcional: truncar se ficar muito grande
+            if (logArea.getLineCount() > 1200) {
+                logArea.setText(logArea.getText().replaceFirst("(?s)^.*?\\n", "")); // remove primeiras linhas
+            }
+        }
+
+        private Icon criarBola(Color cor) {
             return new Icon() {
                 private final int SIZE = 10;
                 @Override public void paintIcon(Component c, Graphics g, int x, int y) {
@@ -546,27 +267,113 @@ public class BancadaUI {
             };
         }
 
-        private static void estilizarBotaoPrimario(JButton b) {
-            b.setBackground(Color.WHITE);
-            b.setForeground(new Color(51, 51, 51));
-            b.setFocusPainted(false);
-            b.setBorder(BorderFactory.createCompoundBorder(
-                    BorderFactory.createLineBorder(new Color(209, 107, 165), 2),
-                    BorderFactory.createEmptyBorder(10, 16, 10, 16)
-            ));
+        // ---------- Worker que realiza a leitura periódica ----------
+        private class MonitorWorker extends SwingWorker<Void, String> {
+            private final String setor, ip, tipo;
+            private final int db, offset, intervaloMs;
+            private final Integer bit, size;
+            private PlcConnector connector;
+
+            MonitorWorker(String setor, String ip, String tipo, int db, int offset,
+                          Integer bit, Integer size, int intervaloMs) {
+                this.setor = setor; this.ip = ip; this.tipo = tipo;
+                this.db = db; this.offset = offset; this.bit = bit; this.size = size;
+                this.intervaloMs = intervaloMs;
+            }
+
+            @Override
+            protected Void doInBackground() {
+                try {
+                    connector = new PlcConnector(ip, PORTA_S7);
+                    connector.connect();
+                    publish("[%s] Conectado a %s".formatted(setor, ip));
+                    SwingUtilities.invokeLater(() -> {
+                        lblStatus.setText("Conectado");
+                        lblStatus.setIcon(criarBola(new Color(0,160,0)));
+                    });
+                } catch (Exception e) {
+                    publish("[%s] Falha ao conectar: %s".formatted(setor, e.getMessage()));
+                    cancelar();
+                    return null;
+                }
+
+                while (!isCancelled()) {
+                    try {
+                        Object valor = ler();
+                        String textoValor = formatarValor(valor);
+                        SwingUtilities.invokeLater(() -> lblValorAtual.setText(textoValor));
+                        publish("[%s] %s".formatted(setor, textoValor));
+                        Thread.sleep(intervaloMs);
+                    } catch (InterruptedException ie) {
+                        break;
+                    } catch (Exception e) {
+                        publish("[%s] Erro de leitura: %s".formatted(setor, e.getMessage()));
+                        // tenta reconectar depois de um tempo
+                        dormir(1200);
+                        try {
+                            if (connector != null) {
+                                connector.disconnect();
+                            }
+                        } catch (Exception ignored) {}
+                        try {
+                            connector = new PlcConnector(ip, PORTA_S7);
+                            connector.connect();
+                            publish("[%s] Reconectado".formatted(setor));
+                        } catch (Exception ex) {
+                            publish("[%s] Falha na reconexão: %s".formatted(setor, ex.getMessage()));
+                            dormir(1500);
+                        }
+                    }
+                }
+                fechar();
+                return null;
+            }
+
+            private Object ler() throws Exception {
+                return switch (tipo) {
+                    case "bit" -> connector.readBit(db, offset, bit);
+                    case "byte" -> connector.readByte(db, offset);
+                    case "int" -> connector.readInt(db, offset);
+                    case "float" -> connector.readFloat(db, offset);
+                    case "string" -> connector.readString(db, offset, size);
+                    case "block" -> connector.readBlock(db, offset, size);
+                    default -> "TIPO?";
+                };
+            }
+
+            private String formatarValor(Object v) {
+                if (v == null) return "—";
+                if (v instanceof byte[] arr) return bytesToHex(arr);
+                if (v instanceof Byte b) return String.valueOf(b & 0xFF);
+                if (v instanceof Float f) return String.format("%.3f", f);
+                return String.valueOf(v);
+            }
+
+            private void dormir(long ms) {
+                try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
+            }
+
+            private void fechar() {
+                try { if (connector != null) connector.disconnect(); } catch (Exception ignored) {}
+                SwingUtilities.invokeLater(() -> {
+                    lblStatus.setText("Desconectado");
+                    lblStatus.setIcon(criarBola(Color.RED));
+                    setRodando(false);
+                });
+            }
+
+            private void cancelar() {
+                cancel(true);
+                fechar();
+            }
+
+            @Override
+            protected void process(java.util.List<String> chunks) {
+                for (String s : chunks) appendLog(s);
+            }
         }
 
-        private static void estilizarBotaoPerigo(JButton b) {
-            b.setBackground(Color.WHITE);
-            b.setForeground(new Color(160, 0, 0));
-            b.setFocusPainted(false);
-            b.setBorder(BorderFactory.createCompoundBorder(
-                    BorderFactory.createLineBorder(new Color(200, 80, 80), 2),
-                    BorderFactory.createEmptyBorder(10, 16, 10, 16)
-            ));
-        }
-
-        private static String bytesToHex(byte[] bytes) {
+        private String bytesToHex(byte[] bytes) {
             StringBuilder sb = new StringBuilder();
             for (byte b : bytes) sb.append(String.format("%02X ", b));
             return sb.toString().trim();
