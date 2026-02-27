@@ -2,17 +2,14 @@ import javax.swing.*;
 import javax.swing.border.TitledBorder;
 import java.awt.*;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * BancadaMatrizUI (com escrita por painel)
+ * BancadaMatrizUI (com escrita por painel) – CORRIGIDO
  *
- * - ESTOQUE: offsets 68..95 (um quadrinho por offset)
- * - EXPEDIÇÃO: 12 posições de 2 bytes (INT), iniciando no offset 6, passo 2 (6,8,10,...,28)
- * - Cada setor com DB, tipo (bit/byte/int/float), bit (se for bit), intervalo, Start/Stop.
- * - Atualização com SwingWorker; reconexão automática; fundo rosa claro.
- * - Acrescentado: barra de escrita (Offset, Valor, Gravar) em cada painel.
- *
- * Requer: PlcConnector / S7ProtocolClient.
+ * - Ajustes para parada determinística do worker e estado visual consistente.
+ * - Evita reconectar/atualizar UI após "Parar".
+ * - Habilita/desabilita escrita corretamente conforme conexão.
  */
 public class BancadaMatrizUI extends JFrame {
 
@@ -53,7 +50,7 @@ public class BancadaMatrizUI extends JFrame {
         JPanel grid = new JPanel(new GridLayout(1, 2, 12, 12));
         grid.setOpaque(false);
 
-        // Painel do ESTOQUE: offsets 68..95, passo 1 (default colunas=6)
+        // Painel do ESTOQUE: offsets 68..95
         int[] offsetsEstoque = rangeInclusive(68, 95, 1);
         SetorMatrixPanel estoquePanel = new SetorMatrixPanel(
                 "ESTOQUE", "10.74.241.10",
@@ -110,8 +107,10 @@ public class BancadaMatrizUI extends JFrame {
 
         private final String setor;
         private final String ip;
-        private final int[] offsets; // offsets a apresentar (cada quadrinho)
+        private final int[] offsets;
         private final int columns;
+
+        // Conector + worker
         private PlcConnector connector;
         private MatrixWorker worker;
 
@@ -326,7 +325,7 @@ public class BancadaMatrizUI extends JFrame {
             }
         }
 
-        private void iniciar() {
+        private synchronized void iniciar() {
             if (worker != null && !worker.isDone()) {
                 JOptionPane.showMessageDialog(this, "Este monitor já está rodando.", "Aviso",
                         JOptionPane.INFORMATION_MESSAGE);
@@ -363,14 +362,21 @@ public class BancadaMatrizUI extends JFrame {
             worker.execute();
         }
 
-        private void parar() {
+        private synchronized void parar() {
+            // Sinaliza para o worker não reconectar nem atualizar UI
             if (worker != null) {
-                worker.cancel(true);
-                worker = null;
+                worker.requestStop();
             }
-            try { if (connector != null) connector.disconnect(); } catch (Exception ignored) {}
+
+            try {
+                if (connector != null) {
+                    connector.disconnect();
+                }
+            } catch (Exception ignored) {}
+
             connector = null;
 
+            // Estado visual final (força vermelho e desabilita escrita)
             lblStatus.setText("Desconectado");
             lblStatus.setIcon(criarBola(Color.RED));
             setControlesHabilitados(true);
@@ -400,11 +406,19 @@ public class BancadaMatrizUI extends JFrame {
             private final Integer bit;
             private final int intervaloMs;
 
+            // >>> Flag de execução controlada pelo botão Parar
+            private final AtomicBoolean running = new AtomicBoolean(true);
+
             MatrixWorker(int db, String tipo, Integer bit, int intervaloMs) {
                 this.db = db;
                 this.tipo = tipo;
                 this.bit = bit;
                 this.intervaloMs = intervaloMs;
+            }
+
+            void requestStop() {
+                running.set(false);
+                cancel(true);
             }
 
             @Override
@@ -413,10 +427,19 @@ public class BancadaMatrizUI extends JFrame {
                 try {
                     connector = new PlcConnector(ip, PORTA_S7);
                     connector.connect();
+
+                    if (!running.get() || isCancelled()) {
+                        // Se parou muito rápido, encerra logo
+                        safeDisconnect();
+                        return null;
+                    }
+
                     SwingUtilities.invokeLater(() -> {
-                        lblStatus.setText("Conectado");
-                        lblStatus.setIcon(criarBola(new Color(0,160,0)));
-                        setWriteEnabled(true); // habilitar escrita quando conectado
+                        if (running.get() && !isCancelled()) {
+                            lblStatus.setText("Conectado");
+                            lblStatus.setIcon(criarBola(new Color(0,160,0)));
+                            setWriteEnabled(true); // habilitar escrita quando conectado
+                        }
                     });
                 } catch (Exception e) {
                     SwingUtilities.invokeLater(() -> {
@@ -429,7 +452,7 @@ public class BancadaMatrizUI extends JFrame {
                     return null;
                 }
 
-                while (!isCancelled()) {
+                while (running.get() && !isCancelled()) {
                     try {
                         String[] valores = new String[offsets.length];
                         synchronized (ioLock) {
@@ -439,35 +462,71 @@ public class BancadaMatrizUI extends JFrame {
                             }
                         }
                         publish(new Frame(valores));
-                        Thread.sleep(intervaloMs);
+
+                        // dormir respeitando interrupção
+                        for (int slept = 0; slept < intervaloMs && running.get() && !isCancelled(); slept += 50) {
+                            Thread.sleep(50);
+                        }
                     } catch (InterruptedException ie) {
-                        break;
+                        break; // cancelado
                     } catch (Exception e) {
-                        // Erro: tenta reconectar
+                        // Se já foi solicitado parar, sai sem reconectar
+                        if (!running.get() || isCancelled()) break;
+
+                        // Erro: tenta reconectar somente se ainda estiver rodando
                         SwingUtilities.invokeLater(() -> {
-                            lblStatus.setText("Reconectando...");
-                            lblStatus.setIcon(criarBola(Color.ORANGE));
-                            setWriteEnabled(false);
+                            if (running.get() && !isCancelled()) {
+                                lblStatus.setText("Reconectando...");
+                                lblStatus.setIcon(criarBola(Color.ORANGE));
+                                setWriteEnabled(false);
+                            }
                         });
-                        try { if (connector != null) connector.disconnect(); } catch (Exception ignored) {}
-                        connector = null;
+
+                        safeDisconnect();
+
+                        // Se já foi parado, evite reconectar
+                        if (!running.get() || isCancelled()) break;
+
                         dormir(1200);
+
                         try {
                             connector = new PlcConnector(ip, PORTA_S7);
                             connector.connect();
+
+                            if (!running.get() || isCancelled()) {
+                                safeDisconnect();
+                                break;
+                            }
+
                             SwingUtilities.invokeLater(() -> {
-                                lblStatus.setText("Conectado");
-                                lblStatus.setIcon(criarBola(new Color(0,160,0)));
-                                setWriteEnabled(true);
+                                if (running.get() && !isCancelled()) {
+                                    lblStatus.setText("Conectado");
+                                    lblStatus.setIcon(criarBola(new Color(0,160,0)));
+                                    setWriteEnabled(true);
+                                }
                             });
                         } catch (Exception ex) {
+                            // Se reconexão falhar e já parou, sai
+                            if (!running.get() || isCancelled()) break;
                             dormir(1500);
                         }
                     }
                 }
+
+                // Saída do laço: garante desconexão e UI consistente
+                safeDisconnect();
+                SwingUtilities.invokeLater(() -> {
+                    lblStatus.setText("Desconectado");
+                    lblStatus.setIcon(criarBola(Color.RED));
+                    setControlesHabilitados(true);
+                    setWriteEnabled(false);
+                });
+                return null;
+            }
+
+            private void safeDisconnect() {
                 try { if (connector != null) connector.disconnect(); } catch (Exception ignored) {}
                 connector = null;
-                return null;
             }
 
             private void dormir(long ms) {
@@ -502,6 +561,7 @@ public class BancadaMatrizUI extends JFrame {
 
             @Override
             protected void process(List<Frame> chunks) {
+                if (!running.get() || isCancelled()) return; // evita atualizar UI após Parar
                 Frame f = chunks.get(chunks.size() - 1);
                 String[] vs = f.valores();
                 for (int i = 0; i < vs.length; i++) {
@@ -587,7 +647,7 @@ public class BancadaMatrizUI extends JFrame {
                 }
 
                 if (ok) {
-                    JOptionPane.showMessageDialog(this, "Escrita realizada com sucesso!",
+                    JOptionPane.showMessageDialog(this, "Escrita realizado com sucesso!",
                             "OK", JOptionPane.INFORMATION_MESSAGE);
                     // feedback visual imediato se o offset estiver no painel
                     for (int i = 0; i < offsets.length; i++) {
