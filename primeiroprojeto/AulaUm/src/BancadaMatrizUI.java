@@ -5,11 +5,17 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * BancadaMatrizUI (com escrita por painel) – CORRIGIDO
+ * BancadaMatrizUI (com escrita por painel) – CORRIGIDO + "Mais opções"
  *
- * - Ajustes para parada determinística do worker e estado visual consistente.
- * - Evita reconectar/atualizar UI após "Parar".
- * - Habilita/desabilita escrita corretamente conforme conexão.
+ * - Botão "Mais opções": Ler/Escrever em:
+ *   • ESTE PAINEL (IP atual)
+ *   • PROCESSO  (10.74.241.20)
+ *   • MONTAGEM  (10.74.241.30)
+ *
+ * - Correções do fluxo Parar/Desconectar:
+ *   • Flag running no worker; evita reconectar após Parar
+ *   • UI sempre volta a "Desconectado" (vermelho)
+ *   • Escrita desabilitada ao desconectar
  */
 public class BancadaMatrizUI extends JFrame {
 
@@ -105,6 +111,10 @@ public class BancadaMatrizUI extends JFrame {
     static class SetorMatrixPanel extends JPanel {
         private static final int PORTA_S7 = 102;
 
+        // Alvos adicionais
+        private static final String IP_PROCESSO  = "10.74.241.20";
+        private static final String IP_MONTAGEM  = "10.74.241.30";
+
         private final String setor;
         private final String ip;
         private final int[] offsets;
@@ -124,6 +134,7 @@ public class BancadaMatrizUI extends JFrame {
         private final JSpinner spIntervalo = new JSpinner(new SpinnerNumberModel(1000, 200, 5000, 100));
         private final JButton btnStart = new JButton("Iniciar");
         private final JButton btnStop = new JButton("Parar");
+        private final JButton btnOpcoes = new JButton("Mais opções");
         private final JLabel lblStatus = new JLabel("Desconectado", criarBola(Color.RED), SwingConstants.LEFT);
 
         // Barra de escrita
@@ -181,8 +192,10 @@ public class BancadaMatrizUI extends JFrame {
             botoes.setOpaque(false);
             estilizarBotaoPrimario(btnStart);
             estilizarBotaoPerigo(btnStop);
+            estilizarBotaoPrimario(btnOpcoes);
             botoes.add(btnStart);
             botoes.add(btnStop);
+            botoes.add(btnOpcoes);
 
             c.gridx = 0; c.gridy = row; c.gridwidth = 2; topo.add(lblStatus, c);
             c.gridx = 2; c.gridy = row; c.gridwidth = 2; topo.add(botoes, c);
@@ -246,6 +259,7 @@ public class BancadaMatrizUI extends JFrame {
             btnStart.addActionListener(e -> iniciar());
             btnStop.addActionListener(e -> parar());
             btnGravar.addActionListener(e -> escreverValor());
+            btnOpcoes.addActionListener(e -> abrirMaisOpcoes());
 
             // Sugestões de preenchimento e faixa
             if ("EXPEDIÇÃO".equalsIgnoreCase(setor)) {
@@ -390,6 +404,7 @@ public class BancadaMatrizUI extends JFrame {
             spIntervalo.setEnabled(enabled);
             btnStart.setEnabled(enabled);
             btnStop.setEnabled(!enabled);
+            btnOpcoes.setEnabled(true); // "Mais opções" pode abrir mesmo desconectado
             // Específico de escrita fica a cargo de setWriteEnabled(...)
         }
 
@@ -666,5 +681,230 @@ public class BancadaMatrizUI extends JFrame {
                         "Erro", JOptionPane.ERROR_MESSAGE);
             }
         }
+
+        // ---------------- "Mais opções": Ler/Escrever em outros IPs ----------------
+        private void abrirMaisOpcoes() {
+            new MaisOpcoesDialog(SwingUtilities.getWindowAncestor(this)).setVisible(true);
+        }
+
+        private class MaisOpcoesDialog extends JDialog {
+            private final JComboBox<String> cbDestino;
+            private final JRadioButton rbLer = new JRadioButton("Ler", true);
+            private final JRadioButton rbEscrever = new JRadioButton("Escrever");
+
+            private final JTextField tfDb2 = new JTextField();
+            private final JComboBox<String> cbTipo2 = new JComboBox<>(new String[]{"byte", "bit", "int", "float"});
+            private final JTextField tfBit2 = new JTextField();
+            private final JTextField tfOffset2 = new JTextField();
+            private final JTextField tfValor2 = new JTextField();
+
+            private final JButton btnExecutar = new JButton("Executar");
+            private final JButton btnFechar = new JButton("Fechar");
+
+            private final JLabel lblResultado = new JLabel(" ");
+
+            MaisOpcoesDialog(Window owner) {
+                super(owner, "Mais opções – " + setor, ModalityType.APPLICATION_MODAL);
+                setSize(560, 360);
+                setLocationRelativeTo(owner);
+                setLayout(new BorderLayout(10, 10));
+
+                JPanel form = new JPanel(new GridBagLayout());
+                form.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+                GridBagConstraints c = new GridBagConstraints();
+                c.insets = new Insets(6, 6, 6, 6);
+                c.fill = GridBagConstraints.HORIZONTAL;
+                int row = 0;
+
+                // Destinos
+                cbDestino = new JComboBox<>(new String[]{
+                        "Este painel (" + ip + ")",
+                        "PROCESSO (" + IP_PROCESSO + ")",
+                        "MONTAGEM (" + IP_MONTAGEM + ")"
+                });
+
+                ButtonGroup grp = new ButtonGroup();
+                grp.add(rbLer); grp.add(rbEscrever);
+
+                // Linha 0: Destino + Operação
+                c.gridx = 0; c.gridy = row; form.add(new JLabel("Destino:"), c);
+                c.gridx = 1; c.gridy = row; c.gridwidth = 3; form.add(cbDestino, c);
+                row++;
+                c.gridwidth = 1;
+                c.gridx = 0; c.gridy = row; form.add(new JLabel("Operação:"), c);
+                JPanel ops = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+                ops.add(rbLer); ops.add(rbEscrever);
+                c.gridx = 1; c.gridy = row; c.gridwidth = 3; form.add(ops, c);
+                row++;
+                c.gridwidth = 1;
+
+                // Linha 2: DB / Tipo
+                c.gridx = 0; c.gridy = row; form.add(new JLabel("DB:"), c);
+                c.gridx = 1; c.gridy = row; form.add(tfDb2, c);
+                c.gridx = 2; c.gridy = row; form.add(new JLabel("Tipo:"), c);
+                c.gridx = 3; c.gridy = row; form.add(cbTipo2, c);
+                row++;
+
+                // Linha 3: Bit / Offset
+                c.gridx = 0; c.gridy = row; form.add(new JLabel("Bit (0-7):"), c);
+                c.gridx = 1; c.gridy = row; form.add(tfBit2, c);
+                c.gridx = 2; c.gridy = row; form.add(new JLabel("Offset:"), c);
+                c.gridx = 3; c.gridy = row; form.add(tfOffset2, c);
+                row++;
+
+                // Linha 4: Valor (apenas escrita)
+                c.gridx = 0; c.gridy = row; form.add(new JLabel("Valor (p/ escrever):"), c);
+                c.gridx = 1; c.gridy = row; c.gridwidth = 3; form.add(tfValor2, c);
+                row++;
+                c.gridwidth = 1;
+
+                // Linha 5: Resultado
+                c.gridx = 0; c.gridy = row; form.add(new JLabel("Resultado:"), c);
+                lblResultado.setForeground(new Color(30, 80, 30));
+                c.gridx = 1; c.gridy = row; c.gridwidth = 3; form.add(lblResultado, c);
+                row++;
+                c.gridwidth = 1;
+
+                add(form, BorderLayout.CENTER);
+
+                JPanel acoes = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 10));
+                estilizarBotaoPrimario(btnExecutar);
+                estilizarBotaoPrimario(btnFechar);
+                acoes.add(btnExecutar);
+                acoes.add(btnFechar);
+                add(acoes, BorderLayout.SOUTH);
+
+                // Defaults úteis
+                tfDb2.setText(tfDb.getText().trim());
+                cbTipo2.setSelectedItem(cbTipo.getSelectedItem());
+                tfBit2.setEnabled("bit".equals(String.valueOf(cbTipo2.getSelectedItem()).toLowerCase()));
+                cbTipo2.addActionListener(ev -> tfBit2.setEnabled("bit".equals(String.valueOf(cbTipo2.getSelectedItem()).toLowerCase())));
+
+                btnFechar.addActionListener(e -> dispose());
+                btnExecutar.addActionListener(e -> executarOperacao());
+            }
+
+            private void executarOperacao() {
+                lblResultado.setForeground(new Color(30, 80, 30));
+                lblResultado.setText("Executando...");
+
+                final boolean isLeitura = rbLer.isSelected();
+                final String tipo = String.valueOf(cbTipo2.getSelectedItem()).toLowerCase();
+
+                // 1) Parse/validação em variáveis temporárias
+                int tmpDb, tmpOffset;
+                Integer tmpBit = null;
+                try {
+                    tmpDb = Integer.parseInt(tfDb2.getText().trim());
+                    tmpOffset = Integer.parseInt(tfOffset2.getText().trim());
+                    if ("bit".equals(tipo)) {
+                        tmpBit = Integer.parseInt(tfBit2.getText().trim());
+                        if (tmpBit < 0 || tmpBit > 7) throw new IllegalArgumentException("Bit deve ser 0..7");
+                    }
+                } catch (Exception ex) {
+                    lblResultado.setForeground(new Color(150, 20, 20));
+                    lblResultado.setText("Campos inválidos: " + ex.getMessage());
+                    return;
+                }
+
+                // 2) Versões finais para uso dentro do SwingWorker
+                final int db = tmpDb;
+                final int offset = tmpOffset;
+                final Integer bit = tmpBit;
+
+                final String destinoSelecionado = String.valueOf(cbDestino.getSelectedItem());
+                final String targetIp =
+                        destinoSelecionado.contains("PROCESSO") ? IP_PROCESSO :
+                        destinoSelecionado.contains("MONTAGEM") ? IP_MONTAGEM : ip;
+
+                // Worker assíncrono para não travar UI
+                new SwingWorker<Void, Void>() {
+                    String resultadoMsg = "";
+                    Color cor = new Color(30, 80, 30);
+
+                    @Override
+                    protected Void doInBackground() {
+                        PlcConnector tmpConnector = null;
+                        boolean reutilizarPainel = (targetIp.equals(ip) && connector != null);
+
+                        try {
+                            if (reutilizarPainel) {
+                                // Usa a conexão do painel (sincronizada)
+                                synchronized (ioLock) {
+                                    if (isLeitura) {
+                                        resultadoMsg = lerValor(connector, db, offset, bit, tipo);
+                                    } else {
+                                        String valorStr = tfValor2.getText().trim();
+                                        boolean ok = escreverValor(connector, db, offset, bit, tipo, valorStr);
+                                        resultadoMsg = ok ? "Escrita realizada com sucesso (painel)." : "Falha na escrita (painel).";
+                                    }
+                                }
+                            } else {
+                                // Conexão temporária ao outro IP
+                                tmpConnector = new PlcConnector(targetIp, PORTA_S7);
+                                tmpConnector.connect();
+                                if (isLeitura) {
+                                    resultadoMsg = lerValor(tmpConnector, db, offset, bit, tipo);
+                                } else {
+                                    String valorStr = tfValor2.getText().trim();
+                                    boolean ok = escreverValor(tmpConnector, db, offset, bit, tipo, valorStr);
+                                    resultadoMsg = ok ? "Escrita realizada com sucesso." : "Falha na escrita.";
+                                }
+                            }
+                        } catch (Exception ex) {
+                            cor = new Color(150, 20, 20);
+                            resultadoMsg = "Erro: " + ex.getMessage();
+                        } finally {
+                            try {
+                                if (tmpConnector != null) tmpConnector.disconnect();
+                            } catch (Exception ignored) {}
+                        }
+                        return null;
+                    }
+
+                    @Override
+                    protected void done() {
+                        lblResultado.setForeground(cor);
+                        lblResultado.setText("[" + targetIp + "] " + resultadoMsg);
+                    }
+                }.execute();
+            }
+
+            private String lerValor(PlcConnector conn, int db, int offset, Integer bit, String tipo) throws Exception {
+                return switch (tipo) {
+                    case "bit" -> String.valueOf(conn.readBit(db, offset, bit));
+                    case "byte" -> String.valueOf(conn.readByte(db, offset) & 0xFF);
+                    case "int" -> String.valueOf(conn.readInt(db, offset));
+                    case "float" -> String.format("%.3f", conn.readFloat(db, offset));
+                    default -> throw new IllegalArgumentException("Tipo não suportado: " + tipo);
+                };
+            }
+
+            private boolean escreverValor(PlcConnector conn, int db, int offset, Integer bit, String tipo, String valorStr) throws Exception {
+                return switch (tipo) {
+                    case "bit" -> {
+                        boolean logic;
+                        if (valorStr.equalsIgnoreCase("true") || valorStr.equals("1")) logic = true;
+                        else if (valorStr.equalsIgnoreCase("false") || valorStr.equals("0")) logic = false;
+                        else throw new IllegalArgumentException("Valor para bit deve ser true/false ou 1/0.");
+                        yield conn.writeBit(db, offset, bit, logic);
+                    }
+                    case "byte" -> {
+                        int n = Integer.parseInt(valorStr);
+                        if (n < 0 || n > 255) throw new IllegalArgumentException("Byte deve ser 0..255.");
+                        yield conn.writeByte(db, offset, (byte) n);
+                    }
+                    case "int" -> {
+                        int n = Integer.parseInt(valorStr);
+                        yield conn.writeInt(db, offset, n);
+                    }
+                    case "float" -> {
+                        float f = Float.parseFloat(valorStr.replace(",", "."));
+                        yield conn.writeFloat(db, offset, f);
+                    }
+                    default -> throw new IllegalArgumentException("Tipo não suportado para escrita: " + tipo);
+                };
+            }
+        }
     }
-}
+}   
